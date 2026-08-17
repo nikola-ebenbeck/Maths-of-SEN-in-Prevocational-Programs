@@ -1,0 +1,205 @@
+# 0. Load Packages ####
+library(tidyverse)                                                              # Data Wrangling
+library(lubridate)                                                              # Tidyverse Extension for Dates
+library(pairwise)                                                               # Rasch Analysen
+library(TAM)                                                                    # IRT Analysen
+library(WrightMap)                                                              # Wright Map
+library(eRm)                                                                    # Graphical Model Check
+library(tidyLPA)                                                                # LPA
+library(mclust)                                                                 # LPA
+
+# 1. Data Wrangling ####
+setwd() # Please make sure to fill in here, where to find the data.
+#_______________________________________________________________________________
+# Read Original Data
+Weights <- read.csv("Originaldaten/GVE4_2022_07_13.csv")                        # Weights Data
+Lengths <- read.csv("Originaldaten/LVE4_2022_07_14.csv")                        # Lengths Data
+Operations <- read.csv("Originaldaten/PAL3_2022_07_14.csv")                     # Operations Data
+Tests <- list("Weights"=Weights, "Lengths"=Lengths, "Operations"=Operations)    # All Test Data in List
+#_______________________________________________________________________________
+# Filter Sample
+Tests <- Tests %>% 
+  map(~filter(.x, User_ID == 9479, Testdatum == "2022-07-12")) %>%              # Filter Researcher's User ID & Test Date
+  map(~group_by(.x, Ergebnis_ID)) %>%                                           # Group by Result ID
+  map(~mutate(.x, mean_time = mean(time, na.rm=T))) %>%                         # Calculate Mean Time per Item
+  map(~filter(.x, mean_time > 1000)) %>%                                        # Filter Mean Time per Item > 1 Second
+  map(~ungroup(.x))
+#_______________________________________________________________________________
+# Test Answers
+Answers_Power <- Tests %>%                                                      # Answers to all Items as Power Test
+  map(~select(.x, Kind_ID, result, item)) %>%                                   # Select relevant Information
+  map(~pivot_wider(.x, names_from=item, values_from=result)) %>%                # Turn Long Format to Wide Format
+  map(~select_if(.x, ~sum(!is.na(.)) > 0))                                      # Delete Items without Responses
+
+Answers_Speed <- Answers_Power %>% map(~replace(.x, is.na(.x),0))               # Answers to all Items as Speed Test
+
+Answers_Power$Weights <- select(Answers_Power$Weights, 1:31)                    # Select First 30 Items
+Answers_Power$Lengths <- select(Answers_Power$Lengths, 1:31)                    # Select First 30 Items
+Answers_Power$Operations <- select(Answers_Power$Operations, 1:33)              # Select First 32 Items
+#_______________________________________________________________________________
+# Save Data
+write.csv(Answers_Power$Weights, "Weights_Power.csv")
+write.csv(Answers_Power$Lengths, "Lengths_Power.csv")
+write.csv(Answers_Power$Operations, "Operations_Power.csv")
+write.csv(Answers_Speed$Weights, "Weights_Speed.csv")
+write.csv(Answers_Speed$Lengths, "Lengths_Speed.csv")
+write.csv(Answers_Speed$Operations, "Operations_Speed.csv")
+#_______________________________________________________________________________
+# Reload Data
+Answers_Power <- list("Weights"=read.csv("Weights_Power.csv"), 
+                      "Lengths"=read.csv("Lengths_Power.csv"), 
+                      "Operations"=read.csv("Operations_Power.csv"))
+Answers_Speed <- list("Weights"=read.csv("Weights_Speed.csv"), 
+                      "Lengths"=read.csv("Lengths_Speed.csv"), 
+                      "Operations"=read.csv("Operations_Speed.csv"))
+#_______________________________________________________________________________
+
+# 2. Sample Analyis ####
+Sample <- Tests$Weights %>%                                                     
+  select(Kind_ID, Geschlecht, Geburtsdatum, Testdatum) %>% unique() %>%         # Set up Sample
+  mutate(Age = trunc((Geburtsdatum %--% Testdatum) / years(1)))                 # Calculate Age
+mean(Sample$Age)
+sd(Sample$Age)
+
+# 3. Power Test Analysis ####
+Answers_Power_Rasch <- Answers_Power %>% map(~select(.x,-Kind_ID, -X))          # Rasch Format of Answers
+#_______________________________________________________________________________
+# Unidimensional Rasch Analysis (Weight & Lengths)
+Answers_Pair <- Answers_Power_Rasch %>% map(~pair(.x,m=2))                      # Pairwise Rasch Calculation
+Answers_Pers <- Answers_Pair %>% map(~pers(.x))                                 # Person Parameter Estimation
+
+plot(Answers_Pers$Weights, itemNames=F, main="Weights")                         # Person-Item-Map Weights
+plot(Answers_Pers$Lengths, itemNames=F, main="Lengths")                         # Person-Item-Map Lengths
+#_______________________________________________________________________________
+# Multidimensional Rasch Analysis (Arithmetic Operations)
+Q <- data.frame("Item" = colnames(Answers_Power_Rasch$Operations))              # Creating Base for Q Matrix
+Q <- mutate(Q, "D1" = c(9, 7, 3, 10, 15, 6, 13, 5, 11, 8, 12, 4, 14, 1, 16, 2,  # Item Order of Test
+                        8, 15, 12, 5, 1, 7, 13, 10, 6, 3, 14, 2, 16, 9, 4, 11), # Set all Items in Dimension 1
+               "D2" = D1)                                                       # And set all Items in Dimension 1
+Q["D1"][Q["D1"] >= 1 & Q["D1"] <= 8] <- 1                                       # Which Items belong to Dimension 1?
+Q["D1"][Q["D1"] >= 9] <- 0                                                      # Which Items don't belong to Dimension 1?
+Q["D2"][Q["D2"] <= 8] <- 0                                                      # Which Items belong to Dimension 2?
+Q["D2"][Q["D2"] >= 9 & Q["D2"] <= 16] <- 1                                      # Which Items don't belong to Dimension 2?
+
+Answers_TAM <- tam(Answers_Power_Rasch$Operations, Q=select(Q, -c("Item")))     # Two-Dimensional Rasch Calculation
+Answers_TAM_Pers <- tam.wle(Answers_TAM)                                        # Person Parameter Estimationn 
+
+wrightMap(thetas=select(Pers_2D, starts_with("theta")),                         # Wright Map
+          thresholds = tam.threshold(Rasch_2D), thr.sym.pch = 1, 
+          item.prop = 0.5, thr.lab.cex = 0.5, show.thr.sym = T, 
+          show.thr.lab = F, label.items = "", label.items.ticks = F)
+#_______________________________________________________________________________
+# Graphical Model Check
+GRM <- Answers_Power_Rasch %>% map(~RM(.x))                                     # Rasch Analysis for Graphical Model Check
+GRM <- GRM %>% map(~LRtest(.x, splitcr = "median"))                             # Andersen Test for Graphical Model Check
+?plotGOF
+
+plotGOF(GRM$Weights, main="Weights", conf=list(), tlab="item",                  # GRM for Weights
+        xlab="Scores < Median", ylab="Scores > Median")
+plotGOF(GRM$Lengths, main="Lengths", conf=list(), tlab="item",                  # GRM for Lengths
+        xlab="Scores < Median", ylab="Scores > Median")
+#_______________________________________________________________________________
+# Solution Probabilities
+Answers_Operations <- list(                                                     # Create Liste with Operations
+  Add_Sub = select(Answers_Power_Rasch$Operations,                              # Select Items of Addition & Subtraction
+                   c("I003","I012","I014","I016","I021","I026","I028","I031",
+                     "I002","I006","I008","I010","I017","I020","I022","I025")),
+  Mult_Div = select(Answers_Power_Rasch$Operations,                             # Select Items of Multiplication & Division
+                    c("I001","I004","I009","I011","I019","I024","I030","I032", 
+                      "I005","I007","I013","I015","I018","I023","I027","I029")))
+
+Answers_Weights_Lengths <- Answers_Power_Rasch[-3] %>%                          # Solution Probability & Sumscores for Weights & Lengths
+  map(~rowwise(.x)) %>%                                                         # Operate Rowwise
+  map(~mutate(.x, Summenscore=sum(c_across(1:30), na.rm=T))) %>%                # Calculate Sumscores
+  map(~select(.x, Summenscore)) %>%                                             # Select Sumscores
+  map(~mutate(.x, Probability=(Summenscore/30)*100))                            # Calculate Solution Probability
+
+Answers_Operations <- Answers_Operations %>%                                    # Solution Probability & Sumscores for Operations
+  map(~rowwise(.x)) %>%                                                         # Operate Rowwise
+  map(~mutate(.x, Summenscore=sum(c_across(1:16), na.rm=T))) %>%                # Calculate Sumscores
+  map(~select(.x, Summenscore)) %>%                                             # Select Sumscores
+  map(~mutate(.x, Probability=(Summenscore/16)*100))                            # Calculate Solution Probability
+
+Answers_Weights_Lengths$Weights$Test <- "1"                                     # Set Weights as Test 1
+Answers_Weights_Lengths$Lengths$Test <- "2"                                     # Set Lengths as Test 2
+Answers_Operations$Add_Sub$Test <- "3"                                          # Set Addition & Subtraction as Test 3
+Answers_Operations$Mult_Div$Test <- "4"                                         # Set Multiplication & Division as Test 4
+
+Scores <- rbind(Answers_Weights_Lengths$Weights,Answers_Weights_Lengths$Lengths,# Bind all Sumscores & Probabilities
+                Answers_Operations$Add_Sub,Answers_Operations$Mult_Div)
+
+ggplot(Scores, aes(x=Test, y=Probability)) + geom_boxplot() +                   # Plot
+  ylab("Solution Probability") + xlab("Test") +  
+  scale_x_discrete(labels=c("1"="Weights", "2"="Lengths", 
+                            "3"="Addition & Subtraction", 
+                            "4" = "Multiplication & Division" ))
+#_______________________________________________________________________________
+# Significance Test
+summary(aov(Scores$Probability ~ Scores$Test))                                  # ANOVA
+TukeyHSD(aov(Scores$Probability ~ Scores$Test))                                 # Posthoc Test
+#_______________________________________________________________________________
+# Correlation Analysis
+Cor_Weight_Length <- Answers_Power[-3] %>% map(~rowwise(.x)) %>%                # Correlation Data for Lengths & Weights
+  map(~mutate(.x, Summenscore=sum(c_across(2:31), na.rm=T))) %>%                # Calculate Sum Score
+  map(~mutate(.x, Prob=(Summenscore/30)*100)) %>%                               # Calculate Probability
+  map(~select(.x, Kind_ID, Prob))                                               # Select Columns
+  
+Cor_Add_Sub <- Answers_Power$Operations %>% rowwise() %>%                       # Correlation Data for Addition & Subtraction
+  select(c("Kind_ID","I003","I012","I014","I016","I021","I026","I028","I025",   # Select Items
+           "I031","I002","I006","I008","I010","I017","I020","I022")) %>%
+  mutate(Summenscore=sum(c_across(2:17), na.rm=T)) %>%                          # Calculate Sum Score
+  mutate(Prob=(Summenscore/16)*100) %>% select(Kind_ID, Prob)                   # Calculate Probability & Select
+
+Cor_Mult_Div <- Answers_Power$Operations %>% rowwise() %>%                      # Correlation Data for Multiplication & Division
+  select(c("Kind_ID","I001","I004","I009","I011","I019","I024","I030","I032",   # Select Items
+           "I005","I007","I013","I015","I018","I023","I027","I029")) %>%
+  mutate(Summenscore=sum(c_across(2:17), na.rm=T)) %>%                          # Calculate Sum Score
+  mutate(Prob=(Summenscore/16)*100) %>% select(Kind_ID, Prob)                   # Calculate Probability & Select
+
+Correlation <- list(Cor_Weight_Length$Weights, Cor_Weight_Length$Lengths,       # Create List with all Correlation Data
+                    Cor_Add_Sub, Cor_Mult_Div)
+Correlation <- Correlation %>%                                                  # Merge List into one Dataframe
+  reduce(full_join, by="Kind_ID") %>% select(-Kind_ID) %>% drop_na() %>%
+  rename(Weights=Prob.x, Lengths=Prob.y, AddSub=Prob.x.x, MultDiv=Prob.y.y)     # Rename Columns
+#_______________________________________________________________________________
+# LPA
+LPA <- Answers_Speed %>% map(~select(.x, -X)) %>% map(~rowwise(.x)) %>%                                  # Data Input for LPA
+  map(~mutate(.x, Summenscore=sum(c_across(2:101), na.rm=T))) %>%               # Calculate Sum Score
+  map(~select(.x, Kind_ID, Summenscore))                                        # Select Columns
+
+LPA <- LPA %>%                                    
+  reduce(full_join, by="Kind_ID") %>% select(-Kind_ID) %>% drop_na() %>%        # Merge List into Dataframe
+  rename(Weights=Summenscore.x, Lengths=Summenscore.y, Operations=Summenscore)  # Rename Columns
+
+summary(LPA)                                                                    # Median Values
+x <- LPA %>% pivot_longer(c(Weights, Lengths, Operations), 
+                          names_to = "Tests", values_to = "sumscore")
+
+ggplot(x, aes(x=reorder(Tests, -sumscore), y=sumscore)) + geom_boxplot() +                     # Plot
+  ylab("Sum Score") + xlab("Test") +  
+  scale_x_discrete(labels=c("1"="Weights", "2"="Lengths", 
+                            "3"="Operations"))
+
+
+
+summary(Mclust(LPA, modelNames = "EEI", G = 2, x = BIC))
+summary(Mclust(LPA, modelNames = "EEI", G = 3, x = BIC))
+summary(Mclust(LPA, modelNames = "EEI", G = 4, x = BIC))
+LPA %>% single_imputation() %>% estimate_profiles(4) %>% plot_profiles()
+
+
+
+
+#_______________________________________________________________________________
+# 4. Mean Time per Item ####
+Mean_Time <- Tests %>%                                                          # Select Mean Time for each Student
+  purrr::map( ~select(.x, Kind_ID, Test_ID, mean_time)) %>%
+  purrr::map( ~unique(.x))
+
+median(Mean_Time$Weights$mean_time)                                             # Median Time for Tests
+quantile(Mean_Time$Weights$mean_time, c(0.1, 0.9))                              # Percentile Time for Tests
+median(Mean_Time$Lengths$mean_time)
+quantile(Mean_Time$Lengths$mean_time, c(0.1, 0.9))
+median(Mean_Time$Operations$mean_time)
+quantile(Mean_Time$Operations$mean_time, c(0.1, 0.9))
+
